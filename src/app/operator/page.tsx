@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, memo } from 'react';
 import { 
   Activity, 
   AlertCircle, 
@@ -15,6 +15,226 @@ import {
   ArrowRight
 } from 'lucide-react';
 import { Incident, TelemetryInput } from '@/types';
+import { POLLING_INTERVAL_MS } from '@/lib/constants';
+
+// ─── Memoized Sub-Components ───────────────────────────────────────────────────
+
+/** Props for the IncidentCard component. */
+interface IncidentCardProps {
+  incident: Incident;
+  onApprove: (id: string, gate: string) => void;
+}
+
+/**
+ * Renders a single incident card in the operations decision feed.
+ * Wrapped in React.memo to skip re-rendering when the incident data
+ * and approval handler reference have not changed.
+ */
+const IncidentCard = memo(function IncidentCard({ incident, onApprove }: IncidentCardProps) {
+  const severityStyle = getSeverityStyles(incident.staffPayload.severity);
+
+  return (
+    <article 
+      className={`p-4 rounded-xl border ${severityStyle.border} ${severityStyle.bg} transition-all duration-300 flex flex-col gap-3.5 animate-slide-up`}
+      aria-labelledby={`incident-heading-${incident.id}`}
+    >
+      {/* Alert Card Header */}
+      <header className="flex justify-between items-start gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${severityStyle.badge}`}>
+              {incident.staffPayload.severity}
+            </span>
+            <span className="text-xs font-bold text-slate-400 font-mono">
+              SOP: {incident.staffPayload.sopCited}
+            </span>
+          </div>
+          <h3 id={`incident-heading-${incident.id}`} className="text-sm font-bold text-slate-100 mt-1.5 flex items-center gap-2">
+            {incident.telemetry.gateId} Telemetry Report
+          </h3>
+        </div>
+        <time className="text-[10px] text-slate-500 font-mono" dateTime={incident.timestamp}>
+          {new Date(incident.timestamp).toLocaleTimeString()}
+        </time>
+      </header>
+
+      {/* Dispatched Inputs Summary */}
+      <div className="bg-black/35 rounded-lg p-2.5 text-xs grid grid-cols-2 gap-2 text-slate-400 font-mono border border-slate-800/40">
+        <div>Flow Load: <span className="font-semibold text-slate-200">{incident.telemetry.gateFlowRate}%</span></div>
+        <div>Weather: <span className="font-semibold text-slate-200">{incident.telemetry.weatherCondition}</span></div>
+        {incident.telemetry.incidentReport && (
+          <div className="col-span-2 mt-1 border-t border-slate-800/40 pt-1 text-[11px] truncate">
+            Report: <span className="text-slate-300 italic">&quot;{incident.telemetry.incidentReport}&quot;</span>
+          </div>
+        )}
+      </div>
+
+      {/* Staff Specific Recommendation */}
+      <div>
+        <h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+          Staff Recommendation &amp; Action
+        </h4>
+        <p className="text-xs text-slate-200 mt-1 leading-relaxed bg-slate-950/50 p-2.5 rounded-lg border border-slate-800/50">
+          {incident.staffPayload.recommendation}
+        </p>
+      </div>
+
+      {/* Fan Dual-Message Translation Preview */}
+      <div className="border-t border-slate-800/60 pt-3">
+        <h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1.5 flex items-center gap-1.5">
+          <span>Fan Broadcast Preview</span>
+          <span className="text-[9px] text-slate-600 lowercase font-normal">(English / Spanish)</span>
+        </h4>
+        
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] text-slate-300">
+          <div className="bg-slate-900/50 p-2 rounded border border-slate-800/60 relative">
+            <span className="absolute top-1 right-2 text-[9px] text-slate-600 font-bold uppercase" aria-hidden="true">EN</span>
+            <p className="pr-6 font-medium italic"><span className="sr-only">English: </span>&quot;{incident.fanPayload.englishMessage}&quot;</p>
+          </div>
+          
+          <div className="bg-slate-900/50 p-2 rounded border border-slate-800/60 relative">
+            <span className="absolute top-1 right-2 text-[9px] text-slate-600 font-bold uppercase" aria-hidden="true">ES</span>
+            <p className="pr-6 font-medium italic"><span className="sr-only">Spanish: </span>&quot;{incident.fanPayload.spanishMessage}&quot;</p>
+          </div>
+        </div>
+
+        {/* Metadata tags */}
+        <div className="flex flex-wrap gap-2 mt-2" role="list" aria-label="Incident metadata">
+          <span role="listitem" className="text-[9px] font-mono bg-slate-900 px-2 py-0.5 rounded text-slate-500 border border-slate-800">
+            Theme: {incident.fanPayload.themeColor}
+          </span>
+          <span role="listitem" className="text-[9px] font-mono bg-slate-900 px-2 py-0.5 rounded text-slate-500 border border-slate-800">
+            Icon: {incident.fanPayload.alertIcon}
+          </span>
+          <span role="listitem" className="text-[9px] font-mono bg-slate-900 px-2 py-0.5 rounded text-slate-500 border border-slate-800">
+            Delay: {incident.fanPayload.estimatedDelayMinutes} mins
+          </span>
+          {incident.fanPayload.redirectGate && (
+            <span role="listitem" className="text-[9px] font-mono bg-yellow-950/20 px-2 py-0.5 rounded text-yellow-500 border border-yellow-800/30 font-semibold">
+              Redirect: {incident.fanPayload.redirectGate}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* Approval Broadcast Area */}
+      <footer className="border-t border-slate-800/60 pt-3 flex justify-end">
+        {incident.status === 'approved' ? (
+          <div className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-950/20 border border-emerald-800/60 px-3 py-1.5 rounded-lg font-semibold" role="status">
+            <Check className="w-4 h-4 text-emerald-400" aria-hidden="true" />
+            Broadcast Active on Fan Mobile
+          </div>
+        ) : (
+          <button
+            onClick={() => onApprove(incident.id, incident.telemetry.gateId)}
+            className="bg-rose-700 hover:bg-rose-600 text-white font-bold text-xs py-1.5 px-4 rounded-lg transition-all shadow-md flex items-center gap-1.5 focus:ring-2 focus:ring-rose-500 focus:outline-none"
+            aria-label={`Approve operations broadcast to fan view for ${incident.telemetry.gateId}`}
+          >
+            <span>Approve for Fan Broadcast</span>
+            <ArrowRight className="w-3.5 h-3.5" aria-hidden="true" />
+          </button>
+        )}
+      </footer>
+    </article>
+  );
+});
+
+// ─── Severity Style Helper ─────────────────────────────────────────────────────
+
+/** Returns Tailwind class maps for the given severity level. */
+function getSeverityStyles(severity: string) {
+  switch (severity) {
+    case 'CRITICAL':
+      return {
+        bg: 'bg-red-950/40',
+        text: 'text-red-400',
+        border: 'border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.25)]',
+        badge: 'bg-red-500 text-white animate-pulse'
+      };
+    case 'WARNING':
+      return {
+        bg: 'bg-yellow-950/20',
+        text: 'text-yellow-400',
+        border: 'border-yellow-500/50 shadow-[0_0_10px_rgba(234,179,8,0.15)]',
+        badge: 'bg-yellow-500 text-slate-950'
+      };
+    default:
+      return {
+        bg: 'bg-slate-900/60',
+        text: 'text-emerald-400',
+        border: 'border-slate-800',
+        badge: 'bg-emerald-500 text-slate-950'
+      };
+  }
+}
+
+// ─── SOP Preset Definitions ────────────────────────────────────────────────────
+
+interface SOPPreset {
+  key: string;
+  code: string;
+  label: string;
+  codeColor: string;
+  gateId: string;
+  gateFlowRate: number;
+  weatherCondition: TelemetryInput['weatherCondition'];
+  incidentReport: string;
+}
+
+const SOP_PRESETS: SOPPreset[] = [
+  {
+    key: 'normal',
+    code: 'SOP-GEN-101',
+    label: 'Normal Gate Flow',
+    codeColor: 'text-emerald-400',
+    gateId: 'Gate A',
+    gateFlowRate: 45,
+    weatherCondition: 'Clear',
+    incidentReport: '',
+  },
+  {
+    key: 'overflow',
+    code: 'SOP-FLOW-302',
+    label: 'Gate B Congestion',
+    codeColor: 'text-yellow-400',
+    gateId: 'Gate B',
+    gateFlowRate: 92,
+    weatherCondition: 'Rain',
+    incidentReport: '',
+  },
+  {
+    key: 'lightning',
+    code: 'SOP-WEA-109',
+    label: 'Lightning Alert',
+    codeColor: 'text-red-400',
+    gateId: 'Gate D',
+    gateFlowRate: 62,
+    weatherCondition: 'Lightning',
+    incidentReport: '',
+  },
+  {
+    key: 'medical',
+    code: 'SOP-SEC-404',
+    label: 'Medical Incident',
+    codeColor: 'text-red-400',
+    gateId: 'Gate C',
+    gateFlowRate: 55,
+    weatherCondition: 'Clear',
+    incidentReport: 'Medical emergency at Section 112: spectator collapsed. Paramedics dispatched.',
+  },
+  {
+    key: 'blockage',
+    code: 'SOP-SEC-404',
+    label: 'Walkway Blockage',
+    codeColor: 'text-yellow-400',
+    gateId: 'Gate B',
+    gateFlowRate: 88,
+    weatherCondition: 'Storm',
+    incidentReport: 'Access walkway blocked near turnstiles due to equipment failure.',
+  },
+];
+
+// ─── Main Operator Dashboard ───────────────────────────────────────────────────
 
 export default function OperatorDashboard() {
   const [incidents, setIncidents] = useState<Incident[]>([]);
@@ -31,35 +251,47 @@ export default function OperatorDashboard() {
   // Custom message/toast alert
   const [message, setMessage] = useState<{ text: string; type: 'success' | 'error' } | null>(null);
 
-  // Fetch incidents list from the database api
-  const fetchIncidents = async () => {
+  // ─── Memoized Computed Values ────────────────────────────────────────────────
+
+  /** Count of approved broadcasts, memoized to avoid recalculation on every render. */
+  const approvedCount = useMemo(
+    () => incidents.filter((i) => i.status === 'approved').length,
+    [incidents]
+  );
+
+  /** Latest weather condition from the most recent incident. */
+  const latestWeather = useMemo(
+    () => (incidents.length > 0 ? incidents[0].telemetry.weatherCondition : 'Clear'),
+    [incidents]
+  );
+
+  /** Dynamic color class for the flow rate display. */
+  const flowRateColor = useMemo(() => {
+    if (gateFlowRate >= 85) return 'text-red-400';
+    if (gateFlowRate >= 60) return 'text-yellow-400';
+    return 'text-emerald-400';
+  }, [gateFlowRate]);
+
+  // ─── Stable Callback Handlers ────────────────────────────────────────────────
+
+  /** Fetches incidents from the API with AbortController support. */
+  const fetchIncidents = useCallback(async (signal?: AbortSignal) => {
     try {
-      const res = await fetch('/api/incidents');
+      const res = await fetch('/api/incidents', { signal });
       if (res.ok) {
         const data = await res.json();
         setIncidents(data);
       }
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       console.error('Failed to fetch incidents', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  // Poll for incidents
-  useEffect(() => {
-    fetchIncidents();
-    if (!pollingActive) return;
-
-    const interval = setInterval(() => {
-      fetchIncidents();
-    }, 3000);
-
-    return () => clearInterval(interval);
-  }, [pollingActive]);
-
-  // Handle telemetry simulation submission
-  const handleDispatch = async (e: React.FormEvent) => {
+  /** Handles telemetry simulation form submission. */
+  const handleDispatch = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
     setMessage(null);
@@ -81,7 +313,6 @@ export default function OperatorDashboard() {
       if (res.ok) {
         const data = await res.json();
         setMessage({ text: `Telemetry successfully analyzed by Gemini & logged (ID: ${data.id.substring(0, 8)}).`, type: 'success' });
-        // Clear incident report field after submission
         setIncidentReport('');
         fetchIncidents();
       } else {
@@ -93,47 +324,19 @@ export default function OperatorDashboard() {
     } finally {
       setSubmitting(false);
     }
-  };
+  }, [gateId, gateFlowRate, weatherCondition, incidentReport, fetchIncidents]);
 
-  // Set preset inputs
-  const applyPreset = (presetName: string) => {
+  /** Applies a SOP preset to the form fields. */
+  const applyPreset = useCallback((preset: SOPPreset) => {
     setMessage(null);
-    switch (presetName) {
-      case 'normal':
-        setGateId('Gate A');
-        setGateFlowRate(45);
-        setWeatherCondition('Clear');
-        setIncidentReport('');
-        break;
-      case 'overflow':
-        setGateId('Gate B');
-        setGateFlowRate(92);
-        setWeatherCondition('Rain');
-        setIncidentReport('');
-        break;
-      case 'lightning':
-        setGateId('Gate D');
-        setGateFlowRate(62);
-        setWeatherCondition('Lightning');
-        setIncidentReport('');
-        break;
-      case 'medical':
-        setGateId('Gate C');
-        setGateFlowRate(55);
-        setWeatherCondition('Clear');
-        setIncidentReport('Medical emergency at Section 112: spectator collapsed. Paramedics dispatched.');
-        break;
-      case 'blockage':
-        setGateId('Gate B');
-        setGateFlowRate(88);
-        setWeatherCondition('Storm');
-        setIncidentReport('Access walkway blocked near turnstiles due to equipment failure.');
-        break;
-    }
-  };
+    setGateId(preset.gateId);
+    setGateFlowRate(preset.gateFlowRate);
+    setWeatherCondition(preset.weatherCondition);
+    setIncidentReport(preset.incidentReport);
+  }, []);
 
-  // Approve fan payload
-  const handleApprove = async (id: string, gate: string) => {
+  /** Approves an incident for fan broadcast. */
+  const handleApprove = useCallback(async (id: string, gate: string) => {
     try {
       const res = await fetch(`/api/incidents/${id}/approve`, {
         method: 'POST'
@@ -148,79 +351,95 @@ export default function OperatorDashboard() {
     } catch {
       setMessage({ text: 'Error updating broadcast status.', type: 'error' });
     }
-  };
+  }, [fetchIncidents]);
 
-  // UI helper for severity styles
-  const getSeverityStyles = (severity: string) => {
-    switch (severity) {
-      case 'CRITICAL':
-        return {
-          bg: 'bg-red-950/40',
-          text: 'text-red-400',
-          border: 'border-red-500/50 shadow-[0_0_15px_rgba(239,68,68,0.25)]',
-          badge: 'bg-red-500 text-white animate-pulse'
-        };
-      case 'WARNING':
-        return {
-          bg: 'bg-yellow-950/20',
-          text: 'text-yellow-400',
-          border: 'border-yellow-500/50 shadow-[0_0_10px_rgba(234,179,8,0.15)]',
-          badge: 'bg-yellow-500 text-slate-950'
-        };
-      default:
-        return {
-          bg: 'bg-slate-900/60',
-          text: 'text-emerald-400',
-          border: 'border-slate-800',
-          badge: 'bg-emerald-500 text-slate-950'
-        };
-    }
-  };
+  /** Toggles the polling state. */
+  const togglePolling = useCallback(() => {
+    setPollingActive((prev) => !prev);
+  }, []);
+
+  // ─── Visibility-Aware Polling ────────────────────────────────────────────────
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchIncidents(controller.signal);
+
+    if (!pollingActive) return () => controller.abort();
+
+    let intervalId: ReturnType<typeof setInterval>;
+
+    const startPolling = () => {
+      intervalId = setInterval(() => {
+        fetchIncidents();
+      }, POLLING_INTERVAL_MS);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        clearInterval(intervalId);
+      } else {
+        fetchIncidents();
+        startPolling();
+      }
+    };
+
+    startPolling();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      controller.abort();
+      clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [pollingActive, fetchIncidents]);
+
+  // ─── Render ──────────────────────────────────────────────────────────────────
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
       
       {/* Top Header Navbar */}
-      <header className="border-b border-slate-900 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50 px-6 py-4 flex items-center justify-between">
+      <header className="border-b border-slate-900 bg-slate-900/50 backdrop-blur-md sticky top-0 z-50 px-6 py-4 flex items-center justify-between" role="banner">
         <div className="flex items-center gap-3">
-          <div className="bg-red-600 text-white rounded-lg p-2 flex items-center justify-center font-bold tracking-wider text-xs shadow-md">
+          <a href="/" className="bg-red-600 text-white rounded-lg p-2 flex items-center justify-center font-bold tracking-wider text-xs shadow-md" aria-label="Return to Pulse launchpad">
             PULSE
-          </div>
+          </a>
           <div>
             <h1 className="text-lg font-bold tracking-tight bg-gradient-to-r from-slate-100 to-slate-400 bg-clip-text text-transparent">
               FIFA World Cup 2026 Operations
             </h1>
             <p className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold flex items-center gap-1.5">
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping"></span>
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-ping" aria-hidden="true"></span>
               Live Venue Telemetry Coordinator
             </p>
           </div>
         </div>
 
         <div className="flex items-center gap-4">
-          <div className="flex items-center gap-2 px-3 py-1 bg-slate-800/60 rounded-full border border-slate-700/50 text-xs">
-            <Wifi className="w-3.5 h-3.5 text-emerald-400" />
+          <div className="flex items-center gap-2 px-3 py-1 bg-slate-800/60 rounded-full border border-slate-700/50 text-xs" role="status" aria-label="Connection status: online">
+            <Wifi className="w-3.5 h-3.5 text-emerald-400" aria-hidden="true" />
             <span className="text-slate-400">Connection Status:</span>
             <span className="font-semibold text-emerald-400">ONLINE</span>
           </div>
 
           <button 
-            onClick={() => setPollingActive(!pollingActive)}
+            onClick={togglePolling}
             className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 border transition-all ${
               pollingActive 
                 ? 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700' 
                 : 'bg-yellow-950/40 border-yellow-800 text-yellow-400'
             }`}
             aria-label={pollingActive ? 'Pause operations live polling' : 'Resume operations live polling'}
+            aria-pressed={pollingActive}
           >
-            <RefreshCw className={`w-3 h-3 ${pollingActive ? 'animate-spin' : ''}`} />
+            <RefreshCw className={`w-3 h-3 ${pollingActive ? 'animate-spin' : ''}`} aria-hidden="true" />
             {pollingActive ? 'Auto-Polling Active' : 'Polling Paused'}
           </button>
         </div>
       </header>
 
       {/* Main Grid Content */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <main id="main-content" className="flex-1 max-w-7xl w-full mx-auto p-6 grid grid-cols-1 lg:grid-cols-12 gap-6" role="main">
         
         {/* Left Column: Telemetry Simulation and Presets (5 cols) */}
         <section className="lg:col-span-5 flex flex-col gap-6" aria-labelledby="telemetry-section-title">
@@ -228,49 +447,25 @@ export default function OperatorDashboard() {
           {/* Simulation Preset Quick-Launcher */}
           <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 backdrop-blur-sm">
             <h2 className="text-sm font-bold uppercase tracking-wider text-slate-400 mb-3 flex items-center gap-2">
-              <Layers className="w-4 h-4 text-rose-500" />
+              <Layers className="w-4 h-4 text-rose-500" aria-hidden="true" />
               SOP Simulation Presets
             </h2>
             <p className="text-xs text-slate-500 mb-4">
               Instantly load predefined operations scenarios matching FIFA Stadium Standard Operating Procedures (SOPs).
             </p>
             
-            <div className="grid grid-cols-2 gap-2">
-              <button 
-                onClick={() => applyPreset('normal')}
-                className="p-2.5 rounded-lg bg-slate-800/40 hover:bg-slate-800 border border-slate-700/50 hover:border-slate-600 text-left transition-all group"
-                aria-label="Load normal operations preset"
-              >
-                <div className="text-[11px] font-bold text-emerald-400 mb-0.5">SOP-GEN-101</div>
-                <div className="text-xs font-medium text-slate-200 group-hover:text-white">Normal Gate Flow</div>
-              </button>
-
-              <button 
-                onClick={() => applyPreset('overflow')}
-                className="p-2.5 rounded-lg bg-slate-800/40 hover:bg-slate-800 border border-slate-700/50 hover:border-slate-600 text-left transition-all group"
-                aria-label="Load gate B crowd overflow preset"
-              >
-                <div className="text-[11px] font-bold text-yellow-400 mb-0.5">SOP-FLOW-302</div>
-                <div className="text-xs font-medium text-slate-200 group-hover:text-white">Gate B Congestion</div>
-              </button>
-
-              <button 
-                onClick={() => applyPreset('lightning')}
-                className="p-2.5 rounded-lg bg-slate-800/40 hover:bg-slate-800 border border-slate-700/50 hover:border-slate-600 text-left transition-all group"
-                aria-label="Load lightning severe weather preset"
-              >
-                <div className="text-[11px] font-bold text-red-400 mb-0.5">SOP-WEA-109</div>
-                <div className="text-xs font-medium text-slate-200 group-hover:text-white">Lightning Alert</div>
-              </button>
-
-              <button 
-                onClick={() => applyPreset('medical')}
-                className="p-2.5 rounded-lg bg-slate-800/40 hover:bg-slate-800 border border-slate-700/50 hover:border-slate-600 text-left transition-all group"
-                aria-label="Load medical incident preset"
-              >
-                <div className="text-[11px] font-bold text-red-400 mb-0.5">SOP-SEC-404</div>
-                <div className="text-xs font-medium text-slate-200 group-hover:text-white">Medical Incident</div>
-              </button>
+            <div className="grid grid-cols-2 gap-2" role="group" aria-label="SOP preset buttons">
+              {SOP_PRESETS.map((preset) => (
+                <button 
+                  key={preset.key}
+                  onClick={() => applyPreset(preset)}
+                  className="p-2.5 rounded-lg bg-slate-800/40 hover:bg-slate-800 border border-slate-700/50 hover:border-slate-600 text-left transition-all group"
+                  aria-label={`Load ${preset.label} preset (${preset.code})`}
+                >
+                  <div className={`text-[11px] font-bold ${preset.codeColor} mb-0.5`}>{preset.code}</div>
+                  <div className="text-xs font-medium text-slate-200 group-hover:text-white">{preset.label}</div>
+                </button>
+              ))}
             </div>
           </div>
 
@@ -278,11 +473,11 @@ export default function OperatorDashboard() {
           <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 backdrop-blur-sm flex-1 flex flex-col justify-between">
             <div>
               <h2 id="telemetry-section-title" className="text-sm font-bold uppercase tracking-wider text-slate-400 mb-4 flex items-center gap-2">
-                <Activity className="w-4 h-4 text-rose-500" />
+                <Activity className="w-4 h-4 text-rose-500" aria-hidden="true" />
                 Live Telemetry Generator
               </h2>
 
-              <form onSubmit={handleDispatch} className="space-y-4">
+              <form onSubmit={handleDispatch} className="space-y-4" aria-label="Telemetry simulation form">
                 
                 {/* Gate ID Input */}
                 <div>
@@ -306,9 +501,7 @@ export default function OperatorDashboard() {
                 <div>
                   <div className="flex justify-between text-xs font-semibold text-slate-400 mb-1.5">
                     <label htmlFor="flow-rate">Gate Capacity Load</label>
-                    <span className={`font-bold ${
-                      gateFlowRate >= 85 ? 'text-red-400' : gateFlowRate >= 60 ? 'text-yellow-400' : 'text-emerald-400'
-                    }`}>{gateFlowRate}%</span>
+                    <span className={`font-bold ${flowRateColor}`} aria-live="polite">{gateFlowRate}%</span>
                   </div>
                   <input
                     id="flow-rate"
@@ -318,8 +511,12 @@ export default function OperatorDashboard() {
                     value={gateFlowRate}
                     onChange={(e) => setGateFlowRate(Number(e.target.value))}
                     className="w-full h-1.5 bg-slate-950 rounded-lg appearance-none cursor-pointer accent-rose-600"
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={gateFlowRate}
+                    aria-valuetext={`${gateFlowRate}% capacity`}
                   />
-                  <div className="flex justify-between text-[10px] text-slate-600 mt-1">
+                  <div className="flex justify-between text-[10px] text-slate-600 mt-1" aria-hidden="true">
                     <span>0% (Empty)</span>
                     <span>50% (Normal)</span>
                     <span>85% (SOP Limit)</span>
@@ -366,16 +563,17 @@ export default function OperatorDashboard() {
                   disabled={submitting}
                   className="w-full py-2.5 px-4 bg-gradient-to-r from-rose-700 to-rose-600 hover:from-rose-600 hover:to-rose-500 text-white font-bold rounded-lg text-xs tracking-wider uppercase transition-all shadow-lg flex items-center justify-center gap-2 disabled:opacity-50"
                   aria-label="Dispatch simulated telemetry for evaluation"
+                  aria-busy={submitting}
                 >
                   {submitting ? (
                     <>
-                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
                       Analyzing Telemetry...
                     </>
                   ) : (
                     <>
-                      <Play className="w-3.5 h-3.5" />
-                      Dispatch Telemetry & Analyze
+                      <Play className="w-3.5 h-3.5" aria-hidden="true" />
+                      Dispatch Telemetry &amp; Analyze
                     </>
                   )}
                 </button>
@@ -384,11 +582,15 @@ export default function OperatorDashboard() {
 
             {/* Response notifications */}
             {message && (
-              <div className={`mt-4 p-3.5 rounded-lg border text-xs font-medium ${
-                message.type === 'success' 
-                  ? 'bg-emerald-950/20 border-emerald-800/50 text-emerald-400' 
-                  : 'bg-red-950/20 border-red-800/50 text-red-400'
-              }`}>
+              <div 
+                className={`mt-4 p-3.5 rounded-lg border text-xs font-medium animate-fade-in ${
+                  message.type === 'success' 
+                    ? 'bg-emerald-950/20 border-emerald-800/50 text-emerald-400' 
+                    : 'bg-red-950/20 border-red-800/50 text-red-400'
+                }`}
+                role="alert"
+                aria-live="polite"
+              >
                 {message.text}
               </div>
             )}
@@ -399,34 +601,34 @@ export default function OperatorDashboard() {
         <section className="lg:col-span-7 flex flex-col gap-6" aria-labelledby="operations-feed-title">
           
           {/* Quick Stats Grid */}
-          <div className="grid grid-cols-3 gap-3">
+          <div className="grid grid-cols-3 gap-3" role="region" aria-label="Operations statistics">
             <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 flex flex-col">
               <span className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold flex items-center gap-1">
-                <Users className="w-3.5 h-3.5 text-slate-400" />
+                <Users className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
                 Active Gates
               </span>
-              <span className="text-2xl font-bold text-slate-100 mt-1">4 / 4</span>
+              <span className="text-2xl font-bold text-slate-100 mt-1" aria-label="4 out of 4 gates active">4 / 4</span>
               <span className="text-[9px] text-slate-500 mt-0.5">Operating normally</span>
             </div>
             
             <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 flex flex-col">
               <span className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold flex items-center gap-1">
-                <Wind className="w-3.5 h-3.5 text-slate-400" />
+                <Wind className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
                 Current Weather
               </span>
-              <span className="text-lg font-bold text-slate-100 mt-1.5 truncate">
-                {incidents.length > 0 ? incidents[0].telemetry.weatherCondition : 'Clear'}
+              <span className="text-lg font-bold text-slate-100 mt-1.5 truncate" role="status">
+                {latestWeather}
               </span>
               <span className="text-[9px] text-slate-500 mt-0.5">Based on latest tele</span>
             </div>
 
             <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 flex flex-col">
               <span className="text-[10px] text-slate-500 uppercase tracking-widest font-semibold flex items-center gap-1">
-                <AlertCircle className="w-3.5 h-3.5 text-slate-400" />
+                <AlertCircle className="w-3.5 h-3.5 text-slate-400" aria-hidden="true" />
                 Broadcasts
               </span>
-              <span className="text-2xl font-bold text-rose-500 mt-1">
-                {incidents.filter(i => i.status === 'approved').length}
+              <span className="text-2xl font-bold text-rose-500 mt-1" role="status" aria-label={`${approvedCount} approved redirect alerts`}>
+                {approvedCount}
               </span>
               <span className="text-[9px] text-slate-500 mt-0.5">Approved redirect alerts</span>
             </div>
@@ -436,137 +638,41 @@ export default function OperatorDashboard() {
           <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 backdrop-blur-sm flex-1 flex flex-col">
             <div className="flex items-center justify-between mb-4">
               <h2 id="operations-feed-title" className="text-sm font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                <FileText className="w-4 h-4 text-rose-500" />
-                Operations & Decision Feed
+                <FileText className="w-4 h-4 text-rose-500" aria-hidden="true" />
+                Operations &amp; Decision Feed
               </h2>
-              <span className="text-xs bg-slate-800 border border-slate-700 px-2 py-0.5 rounded-full text-slate-400 font-semibold">
+              <span className="text-xs bg-slate-800 border border-slate-700 px-2 py-0.5 rounded-full text-slate-400 font-semibold" aria-label={`${incidents.length} logged incidents`}>
                 {incidents.length} logs
               </span>
             </div>
 
             {loading ? (
-              <div className="flex-1 flex flex-col items-center justify-center py-12 text-slate-500 gap-2">
-                <RefreshCw className="w-6 h-6 animate-spin text-rose-500" />
+              <div className="flex-1 flex flex-col items-center justify-center py-12 text-slate-500 gap-2" role="status" aria-busy="true">
+                <RefreshCw className="w-6 h-6 animate-spin text-rose-500" aria-hidden="true" />
                 <span className="text-xs font-semibold">Polling active incidents...</span>
               </div>
             ) : incidents.length === 0 ? (
               <div className="flex-1 border border-dashed border-slate-800 rounded-xl flex flex-col items-center justify-center py-16 text-center px-6">
-                <Activity className="w-8 h-8 text-slate-700 mb-3 animate-pulse" />
+                <Activity className="w-8 h-8 text-slate-700 mb-3 animate-pulse" aria-hidden="true" />
                 <h3 className="text-sm font-semibold text-slate-400">No Telemetry Dispatched Yet</h3>
                 <p className="text-xs text-slate-600 max-w-sm mt-1">
                   Use the live telemetry generator on the left to trigger SOP alerts and retrieve Gemini recommendations.
                 </p>
               </div>
             ) : (
-              <div className="space-y-4 max-h-[500px] overflow-y-auto pr-1">
-                {incidents.map((incident) => {
-                  const severityStyle = getSeverityStyles(incident.staffPayload.severity);
-                  return (
-                    <article 
-                      key={incident.id} 
-                      className={`p-4 rounded-xl border ${severityStyle.border} ${severityStyle.bg} transition-all duration-300 flex flex-col gap-3.5`}
-                      aria-labelledby={`incident-heading-${incident.id}`}
-                    >
-                      {/* Alert Card Header */}
-                      <header className="flex justify-between items-start gap-4">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${severityStyle.badge}`}>
-                              {incident.staffPayload.severity}
-                            </span>
-                            <span className="text-xs font-bold text-slate-400 font-mono">
-                              SOP: {incident.staffPayload.sopCited}
-                            </span>
-                          </div>
-                          <h3 id={`incident-heading-${incident.id}`} className="text-sm font-bold text-slate-100 mt-1.5 flex items-center gap-2">
-                            {incident.telemetry.gateId} Telemetry Report
-                          </h3>
-                        </div>
-                        <span className="text-[10px] text-slate-500 font-mono">
-                          {new Date(incident.timestamp).toLocaleTimeString()}
-                        </span>
-                      </header>
-
-                      {/* Dispatched Inputs Summary */}
-                      <div className="bg-black/35 rounded-lg p-2.5 text-xs grid grid-cols-2 gap-2 text-slate-400 font-mono border border-slate-800/40">
-                        <div>Flow Load: <span className="font-semibold text-slate-200">{incident.telemetry.gateFlowRate}%</span></div>
-                        <div>Weather: <span className="font-semibold text-slate-200">{incident.telemetry.weatherCondition}</span></div>
-                        {incident.telemetry.incidentReport && (
-                          <div className="col-span-2 mt-1 border-t border-slate-800/40 pt-1 text-[11px] truncate">
-                            Report: <span className="text-slate-300 italic">&quot;{incident.telemetry.incidentReport}&quot;</span>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Staff Specific Recommendation */}
-                      <div>
-                        <h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                          Staff Recommendation & Action
-                        </h4>
-                        <p className="text-xs text-slate-200 mt-1 leading-relaxed bg-slate-950/50 p-2.5 rounded-lg border border-slate-800/50">
-                          {incident.staffPayload.recommendation}
-                        </p>
-                      </div>
-
-                      {/* Fan Dual-Message Translation Preview */}
-                      <div className="border-t border-slate-800/60 pt-3">
-                        <h4 className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1.5 flex items-center gap-1.5">
-                          <span>Fan Broadcast Preview</span>
-                          <span className="text-[9px] text-slate-600 lowercase font-normal">(English / Spanish)</span>
-                        </h4>
-                        
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] text-slate-300">
-                          <div className="bg-slate-900/50 p-2 rounded border border-slate-800/60 relative">
-                            <span className="absolute top-1 right-2 text-[9px] text-slate-600 font-bold uppercase">EN</span>
-                            <p className="pr-6 font-medium italic">&quot;{incident.fanPayload.englishMessage}&quot;</p>
-                          </div>
-                          
-                          <div className="bg-slate-900/50 p-2 rounded border border-slate-800/60 relative">
-                            <span className="absolute top-1 right-2 text-[9px] text-slate-600 font-bold uppercase">ES</span>
-                            <p className="pr-6 font-medium italic">&quot;{incident.fanPayload.spanishMessage}&quot;</p>
-                          </div>
-                        </div>
-
-                        {/* Metadata tags */}
-                        <div className="flex flex-wrap gap-2 mt-2">
-                          <span className="text-[9px] font-mono bg-slate-900 px-2 py-0.5 rounded text-slate-500 border border-slate-800">
-                            Theme: {incident.fanPayload.themeColor}
-                          </span>
-                          <span className="text-[9px] font-mono bg-slate-900 px-2 py-0.5 rounded text-slate-500 border border-slate-800">
-                            Icon: {incident.fanPayload.alertIcon}
-                          </span>
-                          <span className="text-[9px] font-mono bg-slate-900 px-2 py-0.5 rounded text-slate-500 border border-slate-800">
-                            Delay: {incident.fanPayload.estimatedDelayMinutes} mins
-                          </span>
-                          {incident.fanPayload.redirectGate && (
-                            <span className="text-[9px] font-mono bg-yellow-950/20 px-2 py-0.5 rounded text-yellow-500 border border-yellow-800/30 font-semibold">
-                              Redirect: {incident.fanPayload.redirectGate}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Approval Broadcast Area */}
-                      <footer className="border-t border-slate-800/60 pt-3 flex justify-end">
-                        {incident.status === 'approved' ? (
-                          <div className="flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-950/20 border border-emerald-800/60 px-3 py-1.5 rounded-lg font-semibold">
-                            <Check className="w-4 h-4 text-emerald-400" />
-                            Broadcast Active on Fan Mobile
-                          </div>
-                        ) : (
-                          <button
-                            onClick={() => handleApprove(incident.id, incident.telemetry.gateId)}
-                            className="bg-rose-700 hover:bg-rose-600 text-white font-bold text-xs py-1.5 px-4 rounded-lg transition-all shadow-md flex items-center gap-1.5 focus:ring-2 focus:ring-rose-500 focus:outline-none"
-                            aria-label={`Approve operations broadcast to fan view for ${incident.telemetry.gateId}`}
-                          >
-                            <span>Approve for Fan Broadcast</span>
-                            <ArrowRight className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-                      </footer>
-                    </article>
-                  );
-                })}
+              <div 
+                className="space-y-4 max-h-[500px] overflow-y-auto pr-1 custom-scrollbar" 
+                role="feed" 
+                aria-label="Live incident feed"
+                aria-live="polite"
+              >
+                {incidents.map((incident) => (
+                  <IncidentCard 
+                    key={incident.id} 
+                    incident={incident} 
+                    onApprove={handleApprove} 
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -575,8 +681,8 @@ export default function OperatorDashboard() {
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-slate-900 bg-slate-950 p-4 text-center text-xs text-slate-600">
-        © FIFA World Cup 2026 Stadium Operations Console • Pulse AI Engine Engine. Powered by Gemini.
+      <footer className="border-t border-slate-900 bg-slate-950 p-4 text-center text-xs text-slate-600" role="contentinfo">
+        © FIFA World Cup 2026 Stadium Operations Console • Pulse AI Engine. Powered by Gemini.
       </footer>
     </div>
   );

@@ -1,5 +1,26 @@
+/**
+ * @fileoverview Gemini AI integration and rule-based fallback reasoning engine.
+ *
+ * This module provides the core AI analysis pipeline for the Pulse Stadium Engine.
+ * It sends telemetry data to the Gemini 1.5 Flash model with structured JSON schema
+ * output, and falls back to a deterministic rule-based parser when the API is
+ * unavailable, misconfigured, or rate-limited.
+ *
+ * @module gemini
+ */
+
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { TelemetryInput, DualPayload } from '../types';
+import {
+  GATE_OVERFLOW_THRESHOLD,
+  GATE_CRITICAL_THRESHOLD,
+  ADJACENT_GATE_MAP,
+  DEFAULT_FALLBACK_GATE,
+  SOP_CODES,
+  SEVERITY,
+  ESTIMATED_DELAYS,
+  ISOLATION_PERIMETER_METERS,
+} from './constants';
 
 const API_KEY = process.env.GEMINI_API_KEY;
 
@@ -59,6 +80,27 @@ You must return a response adhering exactly to the following JSON structure:
 }
 `;
 
+/**
+ * Analyzes stadium telemetry input using the Gemini 1.5 Flash AI model.
+ *
+ * Sends a structured prompt to the Gemini API requesting a dual-payload response
+ * containing both staff operations recommendations and fan-facing bilingual messages.
+ * If the Gemini API is unavailable (missing key, network error, quota exceeded),
+ * the function automatically falls back to the deterministic rule-based engine.
+ *
+ * @param telemetry - The validated telemetry input from a stadium gate sensor.
+ * @returns A promise resolving to the dual-payload containing staff and fan instructions.
+ *
+ * @example
+ * ```ts
+ * const payload = await analyzeTelemetry({
+ *   gateId: 'Gate B',
+ *   gateFlowRate: 92,
+ *   weatherCondition: 'Rain',
+ * });
+ * console.log(payload.staff_payload.severity); // 'WARNING'
+ * ```
+ */
 export async function analyzeTelemetry(telemetry: TelemetryInput): Promise<DualPayload> {
   if (!genAI) {
     // Return mock fallback reasoning if Gemini API Key is missing (e.g., local setup / initial runs)
@@ -101,11 +143,7 @@ export async function analyzeTelemetry(telemetry: TelemetryInput): Promise<DualP
       }
     });
 
-    const prompt = `Analyze this live stadium telemetry:
-${JSON.stringify(telemetry, null, 2)}
-
-Ensure the recommendation is highly detailed, professional, and references the appropriate FIFA 2026 venue SOP.
-System context: ${SYSTEM_INSTRUCTION}`;
+    const prompt = `Analyze this live stadium telemetry:\n${JSON.stringify(telemetry, null, 2)}\n\nEnsure the recommendation is highly detailed, professional, and references the appropriate FIFA 2026 venue SOP.\nSystem context: ${SYSTEM_INSTRUCTION}`;
 
     const response = await model.generateContent(prompt);
     const text = response.response.text();
@@ -116,25 +154,41 @@ System context: ${SYSTEM_INSTRUCTION}`;
   }
 }
 
-// Rule-based fallback parser to ensure system functions even under API quotas or configuration gaps
-function generateFallbackReasoning(telemetry: TelemetryInput): DualPayload {
+/**
+ * Deterministic rule-based fallback parser that evaluates telemetry against
+ * FIFA 2026 Venue Standard Operating Procedures.
+ *
+ * This engine ensures full operational continuity when the Gemini API is
+ * unavailable due to quota limits, network issues, or missing credentials.
+ * Rules are evaluated in strict priority order:
+ *
+ * 1. Lightning (SOP-WEA-109) — highest priority, immediate evacuation
+ * 2. Incident report (SOP-SEC-404) — perimeter isolation
+ * 3. Gate overflow (SOP-FLOW-302) — crowd redirection, with ≥95% escalation
+ * 4. Rain/Storm (SOP-WEA-108) — weather advisory
+ * 5. Default normal flow (SOP-GEN-101) — standard monitoring
+ *
+ * @param telemetry - The validated telemetry input to evaluate.
+ * @returns The dual-payload with staff and fan instructions.
+ */
+export function generateFallbackReasoning(telemetry: TelemetryInput): DualPayload {
   const { gateId, gateFlowRate, weatherCondition, incidentReport } = telemetry;
 
-  // 1. Weather Lightning (SOP-WEA-109)
+  // 1. Weather Lightning (SOP-WEA-109) — highest priority
   if (weatherCondition === 'Lightning') {
     return {
       staff_payload: {
-        recommendation: `[WEATHER EVACUATION] Lightening detected. Invoke SOP-WEA-109 immediately. Evacuate upper deck levels at ${gateId}. Move operations to indoor channels. Set warning signals.`,
-        severity: 'CRITICAL',
-        sopCited: 'SOP-WEA-109'
+        recommendation: `[WEATHER EVACUATION] Lightning detected. Invoke ${SOP_CODES.LIGHTNING_EVACUATION} immediately. Evacuate upper deck levels at ${gateId}. Move operations to indoor channels. Set warning signals.`,
+        severity: SEVERITY.CRITICAL,
+        sopCited: SOP_CODES.LIGHTNING_EVACUATION,
       },
       fan_payload: {
         englishMessage: 'Severe weather alert: Lightning has been detected near the stadium. For your safety, please seek immediate shelter in the covered concourses.',
         spanishMessage: 'Alerta de clima severo: Se han detectado relámpagos cerca del estadio. Por su seguridad, busque refugio de inmediato en los pasillos cubiertos.',
         themeColor: 'red',
         alertIcon: 'alert',
-        estimatedDelayMinutes: 0
-      }
+        estimatedDelayMinutes: ESTIMATED_DELAYS.NONE,
+      },
     };
   }
 
@@ -142,37 +196,39 @@ function generateFallbackReasoning(telemetry: TelemetryInput): DualPayload {
   if (incidentReport && incidentReport.trim() !== '') {
     return {
       staff_payload: {
-        recommendation: `[SECURITY/MEDICAL ALERT] Active report: "${incidentReport}". Cite SOP-SEC-404. Secure a 20-meter perimeter at the reported location near ${gateId}. Deploy response team.`,
-        severity: 'CRITICAL',
-        sopCited: 'SOP-SEC-404'
+        recommendation: `[SECURITY/MEDICAL ALERT] Active report: "${incidentReport}". Cite ${SOP_CODES.INCIDENT_ISOLATION}. Secure a ${ISOLATION_PERIMETER_METERS}-meter perimeter at the reported location near ${gateId}. Deploy response team.`,
+        severity: SEVERITY.CRITICAL,
+        sopCited: SOP_CODES.INCIDENT_ISOLATION,
       },
       fan_payload: {
         englishMessage: `Safety notice: We are responding to an incident near ${gateId}. Please bypass this area and follow on-site staff directions.`,
         spanishMessage: `Aviso de seguridad: Estamos atendiendo una incidencia cerca de ${gateId}. Evite esta zona y siga las indicaciones del personal.`,
         themeColor: 'red',
         alertIcon: 'alert',
-        estimatedDelayMinutes: 15
-      }
+        estimatedDelayMinutes: ESTIMATED_DELAYS.INCIDENT_RESPONSE,
+      },
     };
   }
 
-  // 3. Gate Capacity Flow (SOP-FLOW-302)
-  if (gateFlowRate >= 85) {
+  // 3. Gate Capacity Flow (SOP-FLOW-302) — with ≥95% escalation to CRITICAL
+  if (gateFlowRate >= GATE_OVERFLOW_THRESHOLD) {
     const nextGate = getAdjacentGate(gateId);
+    const isCritical = gateFlowRate >= GATE_CRITICAL_THRESHOLD;
+
     return {
       staff_payload: {
-        recommendation: `[CROWD OVERFLOW] ${gateId} capacity reached ${gateFlowRate}%. Invoke SOP-FLOW-302. Reroute incoming spectator traffic to ${nextGate}. Adjust signage.`,
-        severity: 'WARNING',
-        sopCited: 'SOP-FLOW-302'
+        recommendation: `[CROWD OVERFLOW] ${gateId} capacity reached ${gateFlowRate}%. Invoke ${SOP_CODES.GATE_REDIRECT}. Reroute incoming spectator traffic to ${nextGate}. Adjust signage.${isCritical ? ' CRITICAL: Near-total capacity — deploy additional crowd marshals immediately.' : ''}`,
+        severity: isCritical ? SEVERITY.CRITICAL : SEVERITY.WARNING,
+        sopCited: SOP_CODES.GATE_REDIRECT,
       },
       fan_payload: {
         englishMessage: `${gateId} is experiencing high crowd volume. To speed up your entry, please proceed to the adjacent ${nextGate}.`,
         spanishMessage: `La entrada ${gateId} registra un alto flujo de personas. Para ingresar más rápido, diríjase a la entrada contigua ${nextGate}.`,
-        themeColor: 'yellow',
+        themeColor: isCritical ? 'red' : 'yellow',
         alertIcon: 'warning',
-        estimatedDelayMinutes: 12,
-        redirectGate: nextGate
-      }
+        estimatedDelayMinutes: ESTIMATED_DELAYS.GATE_REDIRECT,
+        redirectGate: nextGate,
+      },
     };
   }
 
@@ -180,43 +236,44 @@ function generateFallbackReasoning(telemetry: TelemetryInput): DualPayload {
   if (weatherCondition === 'Rain' || weatherCondition === 'Storm') {
     return {
       staff_payload: {
-        recommendation: `[RAIN MONITORING] Heavy rain detected. Invoke SOP-WEA-108. Instruct janitorial crew to deploy wet-floor caution markers near entrances of ${gateId}.`,
-        severity: 'WARNING',
-        sopCited: 'SOP-WEA-108'
+        recommendation: `[RAIN MONITORING] Heavy rain detected. Invoke ${SOP_CODES.RAIN_ADVISORY}. Instruct janitorial crew to deploy wet-floor caution markers near entrances of ${gateId}.`,
+        severity: SEVERITY.WARNING,
+        sopCited: SOP_CODES.RAIN_ADVISORY,
       },
       fan_payload: {
         englishMessage: 'Weather notice: Wet conditions are reported around the stadium. Please watch your step on stairs and walkways.',
         spanishMessage: 'Aviso meteorológico: Se reportan condiciones de lluvia. Tenga cuidado al caminar por escaleras y pasillos.',
         themeColor: 'yellow',
         alertIcon: 'info',
-        estimatedDelayMinutes: 5
-      }
+        estimatedDelayMinutes: ESTIMATED_DELAYS.RAIN_ADVISORY,
+      },
     };
   }
 
   // 5. Default Normal Safe Flow (SOP-GEN-101)
   return {
     staff_payload: {
-      recommendation: `[NORMAL FLOW] Turnstiles operating nominally at ${gateId}. Flow capacity is at ${gateFlowRate}%. Standby monitoring under SOP-GEN-101.`,
-      severity: 'INFO',
-      sopCited: 'SOP-GEN-101'
+      recommendation: `[NORMAL FLOW] Turnstiles operating nominally at ${gateId}. Flow capacity is at ${gateFlowRate}%. Standby monitoring under ${SOP_CODES.NORMAL_FLOW}.`,
+      severity: SEVERITY.INFO,
+      sopCited: SOP_CODES.NORMAL_FLOW,
     },
     fan_payload: {
       englishMessage: `Welcome to the FIFA World Cup 2026! Access via ${gateId} is clear and open. Have a great match.`,
       spanishMessage: `¡Bienvenidos a la Copa Mundial de la FIFA 2026! El acceso por ${gateId} está despejado. Disfrute del partido.`,
       themeColor: 'green',
       alertIcon: 'info',
-      estimatedDelayMinutes: 0
-    }
+      estimatedDelayMinutes: ESTIMATED_DELAYS.NONE,
+    },
   };
 }
 
-function getAdjacentGate(currentGate: string): string {
-  const mapping: { [key: string]: string } = {
-    'Gate A': 'Gate B',
-    'Gate B': 'Gate C',
-    'Gate C': 'Gate D',
-    'Gate D': 'Gate A'
-  };
-  return mapping[currentGate] || 'Gate B';
+/**
+ * Returns the nearest adjacent gate for crowd redirection purposes.
+ * Gates follow a circular mapping: A→B→C→D→A.
+ *
+ * @param currentGate - The identifier of the currently overloaded gate.
+ * @returns The identifier of the recommended alternative gate.
+ */
+export function getAdjacentGate(currentGate: string): string {
+  return ADJACENT_GATE_MAP[currentGate] || DEFAULT_FALLBACK_GATE;
 }

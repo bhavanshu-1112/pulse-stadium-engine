@@ -1,7 +1,21 @@
+/**
+ * @fileoverview Standalone AI reasoning API route.
+ *
+ * - `POST /api/reasoning` — Validates telemetry input and returns the Gemini AI
+ *   dual-payload analysis directly without persisting an incident record.
+ *   Useful for preview/dry-run analysis scenarios.
+ *
+ * @module api/reasoning
+ */
+
 import { NextRequest, NextResponse } from 'next/server';
 import { analyzeTelemetry } from '@/lib/gemini';
-import { TelemetryInput } from '@/types';
+import { validateTelemetryInput } from '@/lib/validation';
 
+/**
+ * Analyzes telemetry via the AI reasoning pipeline and returns the result
+ * without creating a persistent incident record.
+ */
 export async function POST(req: NextRequest) {
   try {
     let body;
@@ -11,28 +25,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Invalid JSON request body.' }, { status: 400 });
     }
 
-    // Validate telemetry fields
-    const { gateId, gateFlowRate, weatherCondition, incidentReport } = body;
-
-    if (typeof gateId !== 'string' || gateId.trim() === '') {
-      return NextResponse.json({ error: 'Invalid or missing gateId.' }, { status: 400 });
+    // Use shared validation utility (DRY)
+    const validationResult = validateTelemetryInput(body);
+    if (!validationResult.success) {
+      return NextResponse.json({ error: validationResult.error }, { status: 400 });
     }
 
-    if (typeof gateFlowRate !== 'number' || gateFlowRate < 0 || gateFlowRate > 100) {
-      return NextResponse.json({ error: 'gateFlowRate must be a number between 0 and 100.' }, { status: 400 });
-    }
-
-    const validConditions = ['Clear', 'Rain', 'Storm', 'Lightning'];
-    if (!validConditions.includes(weatherCondition)) {
-      return NextResponse.json({ error: 'Invalid weatherCondition. Must be one of Clear, Rain, Storm, Lightning.' }, { status: 400 });
-    }
-
-    const telemetry: TelemetryInput = {
-      gateId,
-      gateFlowRate,
-      weatherCondition: weatherCondition as TelemetryInput['weatherCondition'],
-      incidentReport: typeof incidentReport === 'string' && incidentReport.trim() !== '' ? incidentReport : undefined,
-    };
+    const telemetry = validationResult.data;
 
     // Analyze using the Gemini coordinator (secure server-side call)
     const dualPayload = await analyzeTelemetry(telemetry);
