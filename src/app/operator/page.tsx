@@ -14,7 +14,7 @@ import {
   Layers,
   ArrowRight
 } from 'lucide-react';
-import { Incident, TelemetryInput } from '@/types';
+import { Incident, TelemetryInput, SeverityLevel } from '@/types';
 import { POLLING_INTERVAL_MS } from '@/lib/constants';
 
 // ─── Memoized Sub-Components ───────────────────────────────────────────────────
@@ -142,7 +142,7 @@ const IncidentCard = memo(function IncidentCard({ incident, onApprove }: Inciden
 // ─── Severity Style Helper ─────────────────────────────────────────────────────
 
 /** Returns Tailwind class maps for the given severity level. */
-function getSeverityStyles(severity: string) {
+function getSeverityStyles(severity: SeverityLevel) {
   switch (severity) {
     case 'CRITICAL':
       return {
@@ -284,7 +284,7 @@ export default function OperatorDashboard() {
       }
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
-      console.error('Failed to fetch incidents', err);
+      console.error('Failed to fetch incidents:', err);
     } finally {
       setLoading(false);
     }

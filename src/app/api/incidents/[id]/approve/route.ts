@@ -47,18 +47,5 @@ export async function POST(
   }
 }
 
-export async function PATCH(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  try {
-    const updated = await approveIncident(params.id);
-    if (!updated) {
-      return NextResponse.json({ error: 'Incident not found' }, { status: 404 });
-    }
-    return NextResponse.json(updated);
-  } catch (error: unknown) {
-    const errorMessage = error instanceof Error ? error.message : 'Internal Server Error';
-    return NextResponse.json({ error: errorMessage }, { status: 500 });
-  }
-}
+/** PATCH is an idempotent alias for the POST approval handler. */
+export { POST as PATCH };

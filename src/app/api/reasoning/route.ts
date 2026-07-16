@@ -11,6 +11,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { analyzeTelemetry } from '@/lib/gemini';
 import { validateTelemetryInput } from '@/lib/validation';
+import { logger } from '@/lib/logger';
 
 /**
  * Analyzes telemetry via the AI reasoning pipeline and returns the result
@@ -38,7 +39,9 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json(dualPayload);
   } catch (error: unknown) {
-    console.error('Error in /api/reasoning:', error);
+    logger.error('Error in /api/reasoning', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     const errorMessage = error instanceof Error ? error.message : 'Internal Server Error';
     return NextResponse.json({ error: errorMessage }, { status: 500 });
   }

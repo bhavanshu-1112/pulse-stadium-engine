@@ -13,6 +13,7 @@ import { incidents } from '@/lib/db';
 import { analyzeTelemetry } from '@/lib/gemini';
 import { validateTelemetryInput } from '@/lib/validation';
 import { Incident } from '@/types';
+import { logger } from '@/lib/logger';
 
 /**
  * Retrieves all incidents from the in-memory store, sorted by timestamp descending.
@@ -64,11 +65,19 @@ export async function POST(req: NextRequest) {
       status: 'pending',
     };
 
+    // Evict the oldest incident if the in-memory store exceeds the cap
+    const MAX_INCIDENTS = 100;
+    if (incidents.length >= MAX_INCIDENTS) {
+      incidents.splice(0, 1); // Remove the oldest (first inserted)
+    }
+
     incidents.push(newIncident);
 
     return NextResponse.json(newIncident, { status: 201 });
   } catch (error: unknown) {
-    console.error('Error in POST /api/incidents:', error);
+    logger.error('Error in POST /api/incidents', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     const errorMessage = error instanceof Error ? error.message : 'Internal Server Error';
     return NextResponse.json({ error: errorMessage }, { status: 500 });
   }

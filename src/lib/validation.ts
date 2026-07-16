@@ -5,7 +5,7 @@
  */
 
 import { TelemetryInput } from '../types';
-import { VALID_WEATHER_CONDITIONS } from './constants';
+import { VALID_WEATHER_CONDITIONS, VALID_GATE_IDS } from './constants';
 
 /** Validation result for telemetry input parsing. */
 export interface ValidationResult {
@@ -59,8 +59,20 @@ export function validateTelemetryInput(
     return { success: false, error: 'Invalid or missing gateId.' };
   }
 
+  // Validate gateId: must be an accepted gate identifier
+  if (
+    !VALID_GATE_IDS.includes(
+      gateId.trim() as (typeof VALID_GATE_IDS)[number]
+    )
+  ) {
+    return {
+      success: false,
+      error: `Invalid gateId. Must be one of ${VALID_GATE_IDS.join(', ')}.`,
+    };
+  }
+
   // Validate gateFlowRate: must be a number in [0, 100]
-  if (typeof gateFlowRate !== 'number' || gateFlowRate < 0 || gateFlowRate > 100) {
+  if (typeof gateFlowRate !== 'number' || Number.isNaN(gateFlowRate) || gateFlowRate < 0 || gateFlowRate > 100) {
     return {
       success: false,
       error: 'gateFlowRate must be a number between 0 and 100.',

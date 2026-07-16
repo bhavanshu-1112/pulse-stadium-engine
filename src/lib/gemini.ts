@@ -21,6 +21,7 @@ import {
   ESTIMATED_DELAYS,
   ISOLATION_PERIMETER_METERS,
 } from './constants';
+import { logger } from './logger';
 
 const API_KEY = process.env.GEMINI_API_KEY;
 
@@ -104,7 +105,7 @@ You must return a response adhering exactly to the following JSON structure:
 export async function analyzeTelemetry(telemetry: TelemetryInput): Promise<DualPayload> {
   if (!genAI) {
     // Return mock fallback reasoning if Gemini API Key is missing (e.g., local setup / initial runs)
-    console.warn("GEMINI_API_KEY is not defined. Using rule-based fallback reasoning.");
+    logger.warn('GEMINI_API_KEY is not defined. Using rule-based fallback reasoning.');
     return generateFallbackReasoning(telemetry);
   }
 
@@ -147,9 +148,20 @@ export async function analyzeTelemetry(telemetry: TelemetryInput): Promise<DualP
 
     const response = await model.generateContent(prompt);
     const text = response.response.text();
-    return JSON.parse(text) as DualPayload;
+
+    try {
+      return JSON.parse(text) as DualPayload;
+    } catch (parseError) {
+      logger.error('Failed to parse Gemini JSON response, falling back to rule-based parser.', {
+        error: parseError instanceof Error ? parseError.message : String(parseError),
+        responsePreview: text.substring(0, 200),
+      });
+      return generateFallbackReasoning(telemetry);
+    }
   } catch (error) {
-    console.error("Gemini API call failed, falling back to rule-based parser:", error);
+    logger.error('Gemini API call failed, falling back to rule-based parser.', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return generateFallbackReasoning(telemetry);
   }
 }
